@@ -473,16 +473,15 @@ def summarize_digest_in_english(records: list[ArticleRecord]) -> list[str]:
         article_blocks.append(
             (
                 f"[Article {index}]\n"
-                f"Headline: {record.news.headline}\n"
-                f"Source: {record.news.source}\n"
                 f"Body:\n{record.article_text}"
             )
         )
 
     prompt = (
         "You are preparing a concise TSLA morning briefing in English.\n"
-        "Read all articles below, merge overlapping points, and write 4 to 6 short bullet points.\n"
+        "Read the full article bodies below, merge overlapping points, and write 4 to 6 short bullet points.\n"
         "Focus on the biggest themes such as stock moves, demand, production, autonomy, margins, and leadership.\n"
+        "Base the summary on article body details rather than headlines.\n"
         "Do not mention failed article access, login prompts, or scraping issues.\n\n"
         + "\n\n".join(article_blocks)
     )
@@ -491,7 +490,8 @@ def summarize_digest_in_english(records: list[ArticleRecord]) -> list[str]:
 
 def translate_bullets_to_korean(english_bullets: list[str]) -> list[str]:
     prompt = (
-        "한글로 번역해.\n"
+        "Translate the following English TSLA news briefing bullets into natural Korean.\n"
+        "Keep the meaning faithful and concise. Output only Korean bullet points.\n\n"
         + "\n".join(f"- {line}" for line in english_bullets)
     )
     return call_openai_bullets(prompt, max_output_tokens=420)[:6]
@@ -556,7 +556,7 @@ def build_summary_lines(
     news_items = [record.news for record in records]
     keywords = top_keywords(news_items)
     themes = top_themes(news_items)
-    lines = [f"Read and consolidated the full text of {len(records)} TSLA-related articles from the last 24 hours."]
+    lines = [f"Read and consolidated the full article text of {len(records)} TSLA-related articles from the last 24 hours."]
     if removed_duplicates:
         lines.append(f"Removed {removed_duplicates} duplicate articles based on headline and link similarity.")
     if skipped_count:
