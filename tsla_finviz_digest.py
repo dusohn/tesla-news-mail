@@ -16,6 +16,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
@@ -87,6 +88,7 @@ class ArticleSummary:
     article_title: str
     article_text: str
     korean_summary: list[str]
+    note: str = ""
 
 
 class FinvizNewsParser(HTMLParser):
@@ -231,7 +233,13 @@ def clean_text(value: str) -> str:
 
 
 def build_request(url: str, data: bytes | None = None, extra_headers: dict[str, str] | None = None) -> Request:
-    headers = {"User-Agent": USER_AGENT}
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,ko;q=0.8",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
     if extra_headers:
         headers.update(extra_headers)
     return Request(url, data=data, headers=headers)
@@ -380,7 +388,7 @@ def top_themes(items: list[NewsItem], limit: int = 3) -> list[str]:
 
 
 def extract_article_text(url: str) -> tuple[str, str]:
-    request = build_request(url)
+    request = build_request(url, extra_headers={"Referer": FINVIZ_URL.format(ticker=DEFAULT_TICKER)})
     with urlopen(request, timeout=30) as response:
         html_text = response.read().decode("utf-8", errors="replace")
 
@@ -480,15 +488,49 @@ def fallback_summary_from_text(article_text: str) -> list[str]:
 def build_article_summaries(items: list[NewsItem]) -> list[ArticleSummary]:
     summaries: list[ArticleSummary] = []
     for news in items:
-        article_title, article_text = extract_article_text(news.url)
+        try:
+            article_title, article_text = extract_article_text(news.url)
+        except HTTPError as exc:
+            if exc.code in {401, 403, 404, 406, 410, 451}:
+                summaries.append(
+                    ArticleSummary(
+                        news=news,
+                        article_title=news.headline,
+                        article_text="",
+                        korean_summary=["원문 사이트 접근이 차단되어 헤드라인만 확인되었습니다."],
+                        note=f"본문 접근 실패: HTTP {exc.code}",
+                    )
+                )
+                continue
+            raise
+        except URLError as exc:
+            summaries.append(
+                ArticleSummary(
+                    news=news,
+                    article_title=news.headline,
+                    article_text="",
+                    korean_summary=["원문 사이트 연결에 실패해 헤드라인 기준으로만 반영되었습니다."],
+                    note=f"본문 연결 실패: {exc.reason}",
+                )
+            )
+            continue
         if not article_text:
-            raise ValueError(f"기사 본문을 추출하지 못했습니다: {news.url}")
+            summaries.append(
+                ArticleSummary(
+                    news=news,
+                    article_title=article_title,
+                    article_text="",
+                    korean_summary=["본문을 추출하지 못해 헤드라인만 반영되었습니다."],
+                    note="본문 추출 실패",
+                )
+            )
+            continue
         try:
             korean_summary = summarize_article_in_korean(news, article_title, article_text)
         except Exception:
             korean_summary = fallback_summary_from_text(article_text)
             if not korean_summary:
-                raise
+                korean_summary = ["자동 요약에 실패해 원문 링크만 포함했습니다."]
         summaries.append(
             ArticleSummary(
                 news=news,
@@ -547,6 +589,8 @@ def build_plain_body(
             lines.append(f"- [{format_timestamp(news.published_at, digest_tz)}] {news.headline} ({news.source})")
             for summary_line in item.korean_summary:
                 lines.append(f"  • {summary_line}")
+            if item.note:
+                lines.append(f"  • 참고: {item.note}")
             lines.append(f"  원문: {news.url}")
     return "\n".join(lines)
 
@@ -568,6 +612,7 @@ def build_html_body(
                 f"<td><a href=\"{html.escape(item.news.url)}\">{html.escape(item.news.headline)}</a>"
                 f"<div style=\"margin-top: 6px; color: #374151;\">"
                 f"{''.join(f'<div>- {html.escape(line)}</div>' for line in item.korean_summary)}"
+                f"{f'<div>- 참고: {html.escape(item.note)}</div>' if item.note else ''}"
                 "</div></td>"
                 f"<td>{html.escape(item.news.source)}</td>"
                 "</tr>"
