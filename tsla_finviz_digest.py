@@ -64,14 +64,25 @@ STOPWORDS = {
     "with",
 }
 THEME_KEYWORDS = {
-    "실적/전망": {"earnings", "revenue", "profit", "forecast", "guidance", "margin"},
-    "주가/투자의견": {"stock", "shares", "price", "target", "rating", "downgrade", "upgrade"},
-    "전기차 판매": {"delivery", "deliveries", "sales", "demand", "china", "ev", "vehicle"},
-    "자율주행/로보택시": {"fsd", "autonomous", "robotaxi", "self-driving", "autopilot"},
-    "생산/공장": {"factory", "plant", "production", "gigafactory", "battery", "supply"},
-    "경영/인물": {"musk", "elon", "executive", "board"},
-    "규제/리콜": {"recall", "regulator", "regulatory", "lawsuit", "probe", "safety"},
+    "Earnings/Outlook": {"earnings", "revenue", "profit", "forecast", "guidance", "margin"},
+    "Stock/Analyst Views": {"stock", "shares", "price", "target", "rating", "downgrade", "upgrade"},
+    "EV Demand": {"delivery", "deliveries", "sales", "demand", "china", "ev", "vehicle"},
+    "Autonomy/Robotaxi": {"fsd", "autonomous", "robotaxi", "self-driving", "autopilot"},
+    "Production/Supply": {"factory", "plant", "production", "gigafactory", "battery", "supply"},
+    "Leadership": {"musk", "elon", "executive", "board"},
+    "Regulation/Recall": {"recall", "regulator", "regulatory", "lawsuit", "probe", "safety"},
 }
+ARTICLE_BLOCKLIST_PATTERNS = [
+    "keep me signed in",
+    "user id and password",
+    "save the password",
+    "subscriber",
+    "subscribe now",
+    "sign in to continue",
+    "log-in section",
+    "cookie policy",
+    "all rights reserved",
+]
 
 
 @dataclass(frozen=True)
@@ -259,7 +270,7 @@ def load_dotenv(dotenv_path: Path) -> None:
 def require_env(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
-        raise ValueError(f"환경변수 {name} 값이 없습니다.")
+        raise ValueError(f"Environment variable {name} is missing.")
     return value
 
 
@@ -301,7 +312,7 @@ def parse_timestamp(
         )
         return published, published
     if current_date is None:
-        raise ValueError(f"날짜가 없는 시간값을 먼저 받았습니다: {raw_text}")
+        raise ValueError(f"Date-less time value encountered first: {raw_text}")
     parsed_time = datetime.strptime(raw_text, "%I:%M%p").time()
     published = datetime.combine(current_date.date(), parsed_time, tzinfo=finviz_tz)
     return published, current_date
@@ -385,6 +396,11 @@ def top_themes(items: list[NewsItem], limit: int = 3) -> list[str]:
     return [theme for theme, _ in ranked[:limit]]
 
 
+def looks_like_junk_text(article_text: str) -> bool:
+    lowered = article_text.lower()
+    return any(pattern in lowered for pattern in ARTICLE_BLOCKLIST_PATTERNS)
+
+
 def extract_article_text(url: str) -> tuple[str, str]:
     request = build_request(url, extra_headers={"Referer": FINVIZ_URL.format(ticker=DEFAULT_TICKER)})
     with urlopen(request, timeout=30) as response:
@@ -398,7 +414,10 @@ def extract_article_text(url: str) -> tuple[str, str]:
     article_text = "\n".join(paragraphs)
     if not article_text and parser.meta_description:
         article_text = parser.meta_description
-    return article_title, article_text[:12000]
+    article_text = article_text[:12000]
+    if looks_like_junk_text(article_text):
+        return article_title, ""
+    return article_title, article_text
 
 
 def extract_response_text(response_json: dict) -> str:
@@ -417,52 +436,13 @@ def extract_response_text(response_json: dict) -> str:
     return "\n".join(collected)
 
 
-def summarize_digest_in_korean(records: list[ArticleRecord]) -> list[str]:
+def call_openai_bullets(prompt: str, max_output_tokens: int) -> list[str]:
     api_key = require_env("OPENAI_API_KEY")
     model = env_or_default("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
-    article_blocks = []
-    for index, record in enumerate(records, start=1):
-        article_blocks.append(
-            (
-                f"[기사 {index}]\n"
-                f"헤드라인: {record.news.headline}\n"
-                f"출처: {record.news.source}\n"
-                f"본문:\n{record.article_text}"
-            )
-        )
-
     payload = {
         "model": model,
-        "input": [
-            {
-                "role": "developer",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": (
-                            "너는 여러 영어 경제 기사를 읽고 한글 아침 브리핑으로 정리하는 뉴스 비서다. "
-                            "입력에 포함된 기사들만 바탕으로 중복 없이 핵심만 합쳐서 요약하라. "
-                            "출력은 반드시 한국어 bullet 4~6개다."
-                        ),
-                    }
-                ],
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": (
-                            "아래 기사들을 모두 읽고, 서로 겹치는 내용은 합쳐서 TSLA 관련 하루 요약 브리핑으로 작성해줘. "
-                            "주가, 수요, 생산, 자율주행, 경영 이슈처럼 큰 흐름 중심으로 정리하고, "
-                            "기사 접근 실패나 에러 내용은 절대 포함하지 마.\n\n"
-                            + "\n\n".join(article_blocks)
-                        ),
-                    }
-                ],
-            },
-        ],
-        "max_output_tokens": 420,
+        "input": prompt,
+        "max_output_tokens": max_output_tokens,
     }
     request = build_request(
         "https://api.openai.com/v1/responses",
@@ -477,17 +457,48 @@ def summarize_digest_in_korean(records: list[ArticleRecord]) -> list[str]:
 
     output_text = extract_response_text(response_json).strip()
     if not output_text:
-        raise ValueError("OpenAI 종합 요약 결과가 비어 있습니다.")
+        raise ValueError("OpenAI returned an empty response.")
 
     lines: list[str] = []
     for raw_line in output_text.splitlines():
         line = clean_text(raw_line.lstrip("-•0123456789. "))
         if line:
             lines.append(line)
-    return lines[:6]
+    return lines
 
 
-def fallback_digest_summary(records: list[ArticleRecord]) -> list[str]:
+def summarize_digest_in_english(records: list[ArticleRecord]) -> list[str]:
+    article_blocks = []
+    for index, record in enumerate(records, start=1):
+        article_blocks.append(
+            (
+                f"[Article {index}]\n"
+                f"Headline: {record.news.headline}\n"
+                f"Source: {record.news.source}\n"
+                f"Body:\n{record.article_text}"
+            )
+        )
+
+    prompt = (
+        "You are preparing a concise TSLA morning briefing in English.\n"
+        "Read all articles below, merge overlapping points, and write 4 to 6 short bullet points.\n"
+        "Focus on the biggest themes such as stock moves, demand, production, autonomy, margins, and leadership.\n"
+        "Do not mention failed article access, login prompts, or scraping issues.\n\n"
+        + "\n\n".join(article_blocks)
+    )
+    return call_openai_bullets(prompt, max_output_tokens=420)[:6]
+
+
+def translate_bullets_to_korean(english_bullets: list[str]) -> list[str]:
+    prompt = (
+        "Translate the following English TSLA news briefing bullets into natural Korean.\n"
+        "Keep the meaning faithful and concise. Output only Korean bullet points.\n\n"
+        + "\n".join(f"- {line}" for line in english_bullets)
+    )
+    return call_openai_bullets(prompt, max_output_tokens=420)[:6]
+
+
+def fallback_english_summary(records: list[ArticleRecord]) -> list[str]:
     sentences: list[str] = []
     for record in records:
         sentences.extend(re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", record.article_text).strip()))
@@ -496,12 +507,18 @@ def fallback_digest_summary(records: list[ArticleRecord]) -> list[str]:
     seen: set[str] = set()
     for sentence in cleaned:
         key = normalize_title(sentence)
-        if key and key not in seen:
+        if key and key not in seen and not looks_like_junk_text(sentence):
             seen.add(key)
             unique.append(sentence)
         if len(unique) >= 5:
             break
     return unique
+
+
+def fallback_korean_translation(english_bullets: list[str]) -> list[str]:
+    if not english_bullets:
+        return []
+    return ["한국어 번역 생성에 실패했습니다. 아래 영문 요약을 참고해 주세요."]
 
 
 def collect_article_records(items: list[NewsItem]) -> tuple[list[ArticleRecord], int]:
@@ -533,22 +550,22 @@ def build_summary_lines(
 ) -> list[str]:
     if not records:
         return [
-            "최근 24시간 내 본문을 읽을 수 있는 Finviz TSLA 뉴스가 없습니다.",
-            "접근 가능한 기사 본문이 없어 메일에는 빈 결과가 안내됩니다.",
+            "No accessible TSLA article bodies were found from Finviz in the last 24 hours.",
+            "The email contains an empty result because no readable article body was available.",
         ]
 
     news_items = [record.news for record in records]
     keywords = top_keywords(news_items)
     themes = top_themes(news_items)
-    lines = [f"최근 24시간 동안 TSLA 관련 기사 {len(records)}건의 본문을 읽고 종합 요약했습니다."]
+    lines = [f"Read and consolidated the full text of {len(records)} TSLA-related articles from the last 24 hours."]
     if removed_duplicates:
-        lines.append(f"중복 기사 {removed_duplicates}건은 제목과 링크 유사도 기준으로 제거했습니다.")
+        lines.append(f"Removed {removed_duplicates} duplicate articles based on headline and link similarity.")
     if skipped_count:
-        lines.append(f"본문 접근이 불가능한 기사 {skipped_count}건은 요약에서 제외했습니다.")
+        lines.append(f"Excluded {skipped_count} articles because their full text could not be read cleanly.")
     if themes:
-        lines.append("주요 이슈: " + ", ".join(themes))
+        lines.append("Main themes: " + ", ".join(themes))
     if keywords:
-        lines.append("자주 나온 키워드: " + ", ".join(keywords))
+        lines.append("Frequent keywords: " + ", ".join(keywords))
     return lines
 
 
@@ -558,41 +575,50 @@ def format_timestamp(dt: datetime, tz: ZoneInfo) -> str:
 
 def build_plain_body(
     records: list[ArticleRecord],
-    digest_summary: list[str],
+    english_summary: list[str],
+    korean_translation: list[str],
     removed_duplicates: int,
     skipped_count: int,
     now: datetime,
     digest_tz: ZoneInfo,
 ) -> str:
     lines = [
-        "TSLA 최근 24시간 종합 브리핑",
+        "TSLA Daily Briefing",
         "",
-        f"생성 시각: {format_timestamp(now, digest_tz)} ({digest_tz.key})",
+        f"Generated at: {format_timestamp(now, digest_tz)} ({digest_tz.key})",
         "",
     ]
     lines.extend(build_summary_lines(records, removed_duplicates, skipped_count))
     lines.append("")
-    lines.append("한글 종합 요약:")
-    if digest_summary:
-        for line in digest_summary:
+    lines.append("English Summary:")
+    if english_summary:
+        for line in english_summary:
             lines.append(f"- {line}")
     else:
-        lines.append("- 요약할 본문이 없습니다.")
+        lines.append("- No readable article body was available.")
     lines.append("")
-    lines.append("참고 기사:")
+    lines.append("Korean Translation:")
+    if korean_translation:
+        for line in korean_translation:
+            lines.append(f"- {line}")
+    else:
+        lines.append("- 한국어 번역을 만들 수 없습니다.")
+    lines.append("")
+    lines.append("Reference Articles:")
     if records:
         for record in records[:10]:
             news = record.news
             lines.append(f"- [{format_timestamp(news.published_at, digest_tz)}] {news.headline} ({news.source})")
             lines.append(f"  {news.url}")
     else:
-        lines.append("- 포함된 기사가 없습니다.")
+        lines.append("- No included articles.")
     return "\n".join(lines)
 
 
 def build_html_body(
     records: list[ArticleRecord],
-    digest_summary: list[str],
+    english_summary: list[str],
+    korean_translation: list[str],
     removed_duplicates: int,
     skipped_count: int,
     now: datetime,
@@ -602,7 +628,8 @@ def build_html_body(
         f"<li>{html.escape(line)}</li>"
         for line in build_summary_lines(records, removed_duplicates, skipped_count)
     )
-    digest_html = "".join(f"<li>{html.escape(line)}</li>" for line in digest_summary)
+    english_html = "".join(f"<li>{html.escape(line)}</li>" for line in english_summary)
+    korean_html = "".join(f"<li>{html.escape(line)}</li>" for line in korean_translation)
     links_html = "".join(
         (
             "<tr>"
@@ -614,23 +641,25 @@ def build_html_body(
         for record in records[:10]
     )
     if not links_html:
-        links_html = "<tr><td colspan=\"3\">포함된 기사가 없습니다.</td></tr>"
+        links_html = "<tr><td colspan=\"3\">No included articles.</td></tr>"
 
     return f"""\
 <html>
   <body style="font-family: Segoe UI, Arial, sans-serif; line-height: 1.5;">
-    <h2>TSLA 최근 24시간 종합 브리핑</h2>
-    <p>생성 시각: {html.escape(format_timestamp(now, digest_tz))} ({html.escape(digest_tz.key)})</p>
+    <h2>TSLA Daily Briefing</h2>
+    <p>Generated at: {html.escape(format_timestamp(now, digest_tz))} ({html.escape(digest_tz.key)})</p>
     <ul>{summary_html}</ul>
-    <h3>한글 종합 요약</h3>
-    <ul>{digest_html or '<li>요약할 본문이 없습니다.</li>'}</ul>
-    <h3>참고 기사</h3>
+    <h3>English Summary</h3>
+    <ul>{english_html or '<li>No readable article body was available.</li>'}</ul>
+    <h3>Korean Translation</h3>
+    <ul>{korean_html or '<li>한국어 번역을 만들 수 없습니다.</li>'}</ul>
+    <h3>Reference Articles</h3>
     <table border="1" cellspacing="0" cellpadding="8" style="border-collapse: collapse; width: 100%;">
       <thead style="background: #f3f4f6;">
         <tr>
-          <th align="left">시간</th>
-          <th align="left">헤드라인</th>
-          <th align="left">출처</th>
+          <th align="left">Time</th>
+          <th align="left">Headline</th>
+          <th align="left">Source</th>
         </tr>
       </thead>
       <tbody>{links_html}</tbody>
@@ -671,18 +700,18 @@ def send_email(subject: str, plain_body: str, html_body: str) -> None:
 
 def build_subject(now: datetime, digest_tz: ZoneInfo, item_count: int) -> str:
     date_text = format_timestamp(now, digest_tz)
-    return f"[TSLA 뉴스] 최근 24시간 종합 브리핑 ({item_count}건) - {date_text}"
+    return f"[TSLA News] Daily Briefing ({item_count} articles) - {date_text}"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Finviz TSLA 뉴스 종합 브리핑 메일 발송")
+    parser = argparse.ArgumentParser(description="Finviz TSLA daily briefing mailer")
     parser.add_argument("--ticker", default=env_or_default("TICKER", DEFAULT_TICKER))
     parser.add_argument(
         "--lookback-hours",
         type=int,
         default=int(env_or_default("LOOKBACK_HOURS", str(DEFAULT_LOOKBACK_HOURS))),
     )
-    parser.add_argument("--dry-run", action="store_true", help="메일을 보내지 않고 본문만 출력")
+    parser.add_argument("--dry-run", action="store_true", help="Print the email body without sending mail")
     return parser.parse_args()
 
 
@@ -702,15 +731,22 @@ def main() -> int:
         records, skipped_count = collect_article_records(deduped_items)
         if records:
             try:
-                digest_summary = summarize_digest_in_korean(records)
+                english_summary = summarize_digest_in_english(records)
             except Exception:
-                digest_summary = fallback_digest_summary(records)
+                english_summary = fallback_english_summary(records)
+            try:
+                korean_translation = translate_bullets_to_korean(english_summary)
+            except Exception:
+                korean_translation = fallback_korean_translation(english_summary)
         else:
-            digest_summary = []
+            english_summary = []
+            korean_translation = []
+
         subject = build_subject(now, digest_tz, len(records))
         plain_body = build_plain_body(
             records,
-            digest_summary,
+            english_summary,
+            korean_translation,
             removed_duplicates,
             skipped_count,
             now,
@@ -718,7 +754,8 @@ def main() -> int:
         )
         html_body = build_html_body(
             records,
-            digest_summary,
+            english_summary,
+            korean_translation,
             removed_duplicates,
             skipped_count,
             now,
@@ -730,10 +767,10 @@ def main() -> int:
             print(plain_body)
             return 0
         send_email(subject, plain_body, html_body)
-        print(f"메일 발송 완료: {subject}")
+        print(f"Mail sent: {subject}")
         return 0
     except Exception as exc:
-        print(f"실패: {exc}", file=sys.stderr)
+        print(f"Failed: {exc}", file=sys.stderr)
         return 1
 
 
