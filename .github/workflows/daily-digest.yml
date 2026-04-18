@@ -1,25 +1,27 @@
+name: Tesla News Mail
 
-
-on:
+'on':
   schedule:
-    - cron: "0 23 * * *"
     - cron: "0 7 * * *"
       timezone: "Asia/Seoul"
   workflow_dispatch:
 
 jobs:
+  send-digest:
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
         uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v5
         uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: '3.12'
 
+      - name: Send digest
+        env:
+          TICKER: ${{ secrets.TICKER }}
           LOOKBACK_HOURS: ${{ secrets.LOOKBACK_HOURS }}
           FINVIZ_TIMEZONE: ${{ secrets.FINVIZ_TIMEZONE }}
           DIGEST_TIMEZONE: ${{ secrets.DIGEST_TIMEZONE }}
@@ -28,3 +30,10 @@ jobs:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USE_SSL: ${{ secrets.SMTP_USE_SSL }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python tsla_finviz_digest.py
+
+
