@@ -491,8 +491,7 @@ def summarize_digest_in_english(records: list[ArticleRecord]) -> list[str]:
 
 def translate_bullets_to_korean(english_bullets: list[str]) -> list[str]:
     prompt = (
-        "Translate the following English TSLA news briefing bullets into natural Korean.\n"
-        "Keep the meaning faithful and concise. Output only Korean bullet points.\n\n"
+        "한글로 번역해.\n"
         + "\n".join(f"- {line}" for line in english_bullets)
     )
     return call_openai_bullets(prompt, max_output_tokens=420)[:6]
