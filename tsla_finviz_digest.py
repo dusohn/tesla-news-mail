@@ -443,7 +443,7 @@ def summarize_article_in_korean(news: NewsItem, article_title: str, article_text
     with urlopen(request, timeout=90) as response:
         response_json = json.loads(response.read().decode("utf-8"))
 
-    output_text = response_json.get("output_text", "").strip()
+    output_text = extract_response_text(response_json).strip()
     if not output_text:
         raise ValueError(f"OpenAI 요약 결과가 비어 있습니다: {news.url}")
 
@@ -455,13 +455,40 @@ def summarize_article_in_korean(news: NewsItem, article_title: str, article_text
     return lines[:3]
 
 
+def extract_response_text(response_json: dict) -> str:
+    output_text = response_json.get("output_text", "")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text
+
+    collected: list[str] = []
+    for item in response_json.get("output", []):
+        if item.get("type") == "message":
+            for content in item.get("content", []):
+                if content.get("type") in {"output_text", "text"}:
+                    text = content.get("text", "")
+                    if text:
+                        collected.append(text)
+    return "\n".join(collected)
+
+
+def fallback_summary_from_text(article_text: str) -> list[str]:
+    sentences = re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", article_text).strip())
+    cleaned = [clean_text(sentence) for sentence in sentences if len(clean_text(sentence)) >= 40]
+    return cleaned[:3]
+
+
 def build_article_summaries(items: list[NewsItem]) -> list[ArticleSummary]:
     summaries: list[ArticleSummary] = []
     for news in items:
         article_title, article_text = extract_article_text(news.url)
         if not article_text:
             raise ValueError(f"기사 본문을 추출하지 못했습니다: {news.url}")
-        korean_summary = summarize_article_in_korean(news, article_title, article_text)
+        try:
+            korean_summary = summarize_article_in_korean(news, article_title, article_text)
+        except Exception:
+            korean_summary = fallback_summary_from_text(article_text)
+            if not korean_summary:
+                raise
         summaries.append(
             ArticleSummary(
                 news=news,
