@@ -478,11 +478,7 @@ def summarize_digest_in_english(records: list[ArticleRecord]) -> list[str]:
         )
 
     prompt = (
-        "You are preparing a concise TSLA morning briefing in English.\n"
-        "Read the full article bodies below, merge overlapping points, and write 4 to 6 short bullet points.\n"
-        "Focus on the biggest themes such as stock moves, demand, production, autonomy, margins, and leadership.\n"
-        "Base the summary on article body details rather than headlines.\n"
-        "Do not mention failed article access, login prompts, or scraping issues.\n\n"
+        "지금부터 너는 월가의 유명 에널리스트야. 24시간 이전 테슬라 뉴스를 모아서 주요내용을 15줄 이내 한글로 정리해줘\n\n"
         + "\n\n".join(article_blocks)
     )
     return call_openai_bullets(prompt, max_output_tokens=420)[:6]
